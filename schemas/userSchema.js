@@ -14,6 +14,13 @@ const userSchema = new mongoose.Schema(
       lowercase: true,
       unique: true,
     },
+    passwordHash: { type: String, required: true, select: false },
+    role: { type: String, enum: ['SUPERADMIN', 'GYMADMIN', 'TRAINER', 'MEMBER'], required: true },
+    isActive: { type: Boolean, default: true },
+    gym: {
+      type: mongoose.Schema.Types.ObjectId, ref: 'Gym', default: null, index: true,
+      required() { return this.role !== 'SUPERADMIN'; },
+    },
   },
   {
     timestamps: true,
