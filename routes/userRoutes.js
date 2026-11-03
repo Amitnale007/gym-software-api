@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { authenticate, authorize } from '../middleware/auth.js';
 import {
   createUser,
   getUsers,
@@ -6,7 +7,8 @@ import {
 
 const router = Router();
 
-router.post('/', createUser);
-router.get('/', getUsers);
+router.use(authenticate);
+router.post('/', authorize('GYMADMIN'), createUser);
+router.get('/', authorize('SUPERADMIN', 'GYMADMIN'), getUsers);
 
 export default router;

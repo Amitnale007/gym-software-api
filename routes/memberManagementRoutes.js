@@ -1,0 +1,25 @@
+import { Router } from 'express';
+import { authenticate, authorize } from '../middleware/auth.js';
+import { getMemberIdSettings, updateMemberIdSettings } from '../controllers/memberIdController.js';
+import { gymDashboard } from '../controllers/gymDashboardController.js';
+import { listMemberPlans, createMemberPlan, updateMemberPlan, removeMemberPlan, listTrainers, createTrainer, updateTrainer, listMembers, createMember, updateMember, renewMember, memberHistory, deleteMember } from '../controllers/memberManagementController.js';
+
+const router = Router();
+router.use(authenticate);
+router.get('/dashboard/summary', authorize('GYMADMIN', 'TRAINER', 'MEMBER'), gymDashboard);
+router.get('/member-id-settings', authorize('GYMADMIN'), getMemberIdSettings);
+router.patch('/member-id-settings', authorize('GYMADMIN'), updateMemberIdSettings);
+router.get('/member-plans', authorize('GYMADMIN'), listMemberPlans);
+router.post('/member-plans', authorize('GYMADMIN'), createMemberPlan);
+router.patch('/member-plans/:id', authorize('GYMADMIN'), updateMemberPlan);
+router.delete('/member-plans/:id', authorize('GYMADMIN'), removeMemberPlan);
+router.get('/trainers', authorize('GYMADMIN'), listTrainers);
+router.post('/trainers', authorize('GYMADMIN'), createTrainer);
+router.patch('/trainers/:id', authorize('GYMADMIN'), updateTrainer);
+router.get('/members', authorize('GYMADMIN', 'TRAINER', 'MEMBER'), listMembers);
+router.post('/members', authorize('GYMADMIN'), createMember);
+router.patch('/members/:id', authorize('GYMADMIN'), updateMember);
+router.delete('/members/:id', authorize('GYMADMIN'), deleteMember);
+router.post('/members/:id/renew', authorize('GYMADMIN'), renewMember);
+router.get('/members/:id/history', authorize('GYMADMIN', 'TRAINER', 'MEMBER'), memberHistory);
+export default router;

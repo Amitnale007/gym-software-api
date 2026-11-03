@@ -7,6 +7,8 @@ dotenv.config();
 const requiredVariables = [
   'MONGODB_URI',
   'GEMINI_API_KEY',
+  'JWT_ACCESS_SECRET',
+  'JWT_REFRESH_SECRET',
 ];
 
 for (const key of requiredVariables) {
@@ -29,6 +31,12 @@ const variablesToDeploy = [
   'MONGODB_URI',
   'GEMINI_API_KEY',
   'GEMINI_MODEL',
+  'JWT_ACCESS_SECRET',
+  'JWT_ACCESS_EXPIRES_IN',
+  'JWT_REFRESH_SECRET',
+  'JWT_REFRESH_EXPIRES_IN',
+  'FRONTEND_URL',
+  'DNS_SERVERS',
 ];
 
 for (const key of variablesToDeploy) {
