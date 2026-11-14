@@ -28,7 +28,7 @@ async function signIn(email) {
   assert.equal(response.status, 200);
   return response.body.data;
 }
-const planValues = () => ({ name: 'Monthly Fitness', code: 'MONTHLY', price: '500.25', durationMonths: 1, isActive: true });
+const planValues = () => ({ name: 'Monthly Fitness', code: 'MONTHLY', price: '500.25', durationMonths: 1, trainerIncluded: true, isActive: true });
 const memberValues = (suffix = 'one') => ({ name: `Member ${suffix}`, phone: '+91 9876543210', email: '', address: '', joinedOn: todayInIndia(), planId: plan.id, startsOn: todayInIndia(), trainerId: trainer.id, isActive: true, createLogin: false });
 const profile = (value) => ({ name: value.name, email: value.email, phone: value.phone, address: value.address, joinedOn: value.joinedOn, trainerId: value.trainer?.id || '', isActive: value.isActive, revision: value.revision, createLogin: false });
 
@@ -70,7 +70,7 @@ describe('Gym-wise member plans and trainer accounts', { concurrency: false }, (
   it('blocks cross-gym plan updates, removal, and invalid plan values', async () => {
     assert.equal((await request(`/member-plans/${otherPlan.id}`, admin, 'PATCH', { price: '1' })).status, 404);
     assert.equal((await request(`/member-plans/${otherPlan.id}`, admin, 'DELETE')).status, 404);
-    for (const invalid of [{ price: '-1' }, { price: '1.001' }, { price: '10000001' }, { code: 'BAD CODE' }, { durationMonths: 0 }, { durationMonths: 1.5 }, { durationMonths: 13 }, { isActive: 'true' }]) {
+    for (const invalid of [{ price: '-1' }, { price: '1.001' }, { price: '10000001' }, { code: 'BAD CODE' }, { durationMonths: 0 }, { durationMonths: 1.5 }, { durationMonths: 13 }, { isActive: 'true' }, { trainerIncluded: 'true' }, { trainerIncluded: null }]) {
       assert.equal((await request('/member-plans', admin, 'POST', { ...planValues(), name: 'Bad', ...invalid })).status, 400);
     }
   });
@@ -153,6 +153,22 @@ describe('Member registration, assignment, and tenant isolation', { concurrency:
     assert.equal((await request('/members?search=.*', admin)).body.data.length, 0);
     assert.equal((await request(`/members?trainerId=${trainer.id}`, admin)).body.data.length, 2);
     assert.equal((await request('/members?status=BAD', admin)).status, 400);
+  });
+  it('loads full profiles only for the gym admin, assigned trainer, or linked member', async () => {
+    assert.equal((await request(`/members/${member.id}`, null)).status, 401);
+    assert.equal((await request(`/members/${member.id}`, superadmin)).status, 403);
+    assert.equal((await request(`/members/${member.id}`, otherAdmin)).status, 404);
+    assert.equal((await request(`/members/${member.id}`, memberLogin)).status, 404);
+    const unassigned = await Member.findOne({ gym, trainer: null });
+    assert.equal((await request(`/members/${unassigned._id}`, trainerLogin)).status, 404);
+    for (const token of [admin, trainerLogin, memberLogin]) {
+      const response = await request(`/members/${loginMember.id}`, token);
+      assert.equal(response.status, 200);
+      assert.deepEqual(response.body.data, loginMember);
+      assert.equal(response.body.data.passwordHash, undefined);
+    }
+    assert.equal((await request('/members/invalid', admin)).status, 400);
+    assert.equal((await request(`/members/${new mongoose.Types.ObjectId()}`, admin)).status, 404);
   });
   it('keeps cross-gym edits and membership history inaccessible', async () => {
     assert.equal((await request(`/members/${member.id}`, otherAdmin, 'PATCH', profile(member))).status, 404);
@@ -370,6 +386,7 @@ describe('Member renewals and history', { concurrency: false }, () => {
     assert.equal((await request('/members', self)).status, 401);
     assert.equal((await request('/auth/login', null, 'POST', { email: member.email, password: secret })).status, 403);
     assert.equal((await request(`/members/${member.id}`, admin, 'PATCH', profile(member))).status, 404);
+    assert.equal((await request(`/members/${member.id}`, admin)).status, 404);
     assert.equal((await request(`/members/${member.id}/renew`, admin, 'POST', { revision: member.revision })).status, 404);
     assert.equal(await MemberHistory.countDocuments({ member: member.id }), count);
   });
@@ -445,6 +462,119 @@ describe('Live member dashboard summaries', { concurrency: false }, () => {
     assert.deepEqual(result.body.data.recentMembers, []);
     assert.deepEqual(result.body.data.upcomingRenewals, []);
     assert.ok(result.body.data.growth.every((item) => item.count === 0));
+  });
+});
+
+describe('Trainer-included membership plans', { concurrency: false }, () => {
+  let includedPlan, basicPlan, assigned, basicMember, firstTrainer, secondTrainer, firstToken, secondToken;
+  before(async () => {
+    firstTrainer = (await request('/trainers', admin, 'POST', { name: 'Included Trainer', email: 'included-trainer@example.test', password: secret })).body.data;
+    secondTrainer = (await request('/trainers', admin, 'POST', { name: 'Replacement Trainer', email: 'replacement-trainer@example.test', password: secret })).body.data;
+    firstToken = (await signIn(firstTrainer.email)).accessToken;
+    secondToken = (await signIn(secondTrainer.email)).accessToken;
+  });
+  it('saves trainer inclusion, defaults to excluded, and preserves the flag on partial plan edits', async () => {
+    const included = await request('/member-plans', admin, 'POST', { ...planValues(), name: 'Trainer Included', code: 'INCLUDED' });
+    assert.equal(included.status, 201); includedPlan = included.body.data;
+    assert.equal(includedPlan.trainerIncluded, true);
+    const { trainerIncluded: omitted, ...basicValues } = planValues();
+    assert.equal(omitted, true);
+    const basic = await request('/member-plans', admin, 'POST', { ...basicValues, name: 'Without Trainer', code: 'BASIC' });
+    assert.equal(basic.status, 201); basicPlan = basic.body.data;
+    assert.equal(basicPlan.trainerIncluded, false);
+    const updated = await request(`/member-plans/${includedPlan.id}`, admin, 'PATCH', { description: 'Trainer covered by the plan price' });
+    assert.equal(updated.status, 200); assert.equal(updated.body.data.trainerIncluded, true);
+    const listed = (await request('/member-plans', admin)).body.data;
+    assert.equal(listed.find((item) => item.id === includedPlan.id).trainerIncluded, true);
+    assert.equal(listed.find((item) => item.id === basicPlan.id).trainerIncluded, false);
+  });
+  it('rejects assignment on excluded plans without creating profiles, logins, or history', async () => {
+    const counts = [await Member.countDocuments(), await User.countDocuments(), await MemberHistory.countDocuments()];
+    const counter = (await MemberCounter.findById(gym)).value;
+    const result = await request('/members', admin, 'POST', { ...memberValues('excluded'), planId: basicPlan.id, trainerId: firstTrainer.id, trainerIncluded: true, membership: { trainerIncluded: true }, email: 'excluded-login@example.test', createLogin: true, password: secret });
+    assert.equal(result.status, 400); assert.match(result.body.message, /trainer included/);
+    assert.deepEqual([await Member.countDocuments(), await User.countDocuments(), await MemberHistory.countDocuments()], counts);
+    assert.equal((await MemberCounter.findById(gym)).value, counter);
+    const basic = await request('/members', admin, 'POST', { ...memberValues('basic'), planId: basicPlan.id, trainerId: '' });
+    assert.equal(basic.status, 201); basicMember = basic.body.data;
+    assert.equal(basicMember.membership.trainerIncluded, false); assert.equal(basicMember.trainer, null);
+  });
+  it('includes trainer service at the saved price and shows the member only to their assigned trainer', async () => {
+    const created = await request('/members', admin, 'POST', { ...memberValues('included'), planId: includedPlan.id, trainerId: firstTrainer.id });
+    assert.equal(created.status, 201); assigned = created.body.data;
+    assert.equal(assigned.membership.trainerIncluded, true);
+    assert.equal(assigned.membership.pricePaise, includedPlan.pricePaise);
+    const listed = await request(`/members?trainerId=${secondTrainer.id}&gym=${otherGym}&pageSize=5`, firstToken);
+    assert.equal(listed.status, 200);
+    assert.deepEqual(listed.body.data.map((item) => item.id), [assigned.id]);
+    assert.equal(listed.body.meta.pagination.total, 1);
+    assert.deepEqual((await request('/members', secondToken)).body.data, []);
+    assert.equal((await request(`/members/${basicMember.id}/history`, firstToken)).status, 404);
+    const history = await request(`/members/${assigned.id}/history`, firstToken);
+    assert.equal(history.status, 200); assert.equal(history.body.data[0].membership.trainerIncluded, true);
+    const dashboard = await request('/dashboard/summary', firstToken);
+    assert.equal(dashboard.status, 200); assert.equal(dashboard.body.data.totalMembers, 1);
+    assert.equal(dashboard.body.data.recentMembers[0].id, assigned.id);
+  });
+  it('enforces saved membership eligibility during edits despite changes to the plan master', async () => {
+    assert.equal((await request(`/members/${basicMember.id}`, admin, 'PATCH', { ...profile(basicMember), trainerId: firstTrainer.id, trainerIncluded: true, membership: { trainerIncluded: true } })).status, 400);
+    assert.equal((await request(`/member-plans/${includedPlan.id}`, admin, 'PATCH', { trainerIncluded: false })).status, 200);
+    const edited = await request(`/members/${assigned.id}`, admin, 'PATCH', profile(assigned));
+    assert.equal(edited.status, 200); assigned = edited.body.data;
+    assert.equal(assigned.membership.trainerIncluded, true); assert.equal(assigned.trainer.id, firstTrainer.id);
+    const history = await request(`/members/${assigned.id}/history`, admin);
+    assert.equal(history.body.data[0].membership.trainerIncluded, true);
+    assert.equal((await request('/members', admin, 'POST', { ...memberValues('master-now-excluded'), planId: includedPlan.id, trainerId: firstTrainer.id })).status, 400);
+    assert.equal((await request(`/member-plans/${includedPlan.id}`, admin, 'PATCH', { trainerIncluded: true })).status, 200);
+  });
+  it('retains the assigned trainer on an eligible renewal and updates visibility when reassigned', async () => {
+    await Member.updateOne({ _id: assigned.id }, { $set: { 'membership.startsOn': addDays(todayInIndia(), -100), 'membership.expiresOn': addDays(todayInIndia(), -1) } });
+    const renewed = await request(`/members/${assigned.id}/renew`, admin, 'POST', { revision: assigned.revision });
+    assert.equal(renewed.status, 200); assigned = renewed.body.data;
+    assert.equal(assigned.membership.trainerIncluded, true); assert.equal(assigned.trainer.id, firstTrainer.id);
+    assert.equal(assigned.membership.pricePaise, includedPlan.pricePaise);
+    const edited = await request(`/members/${assigned.id}`, admin, 'PATCH', { ...profile(assigned), trainerId: secondTrainer.id });
+    assert.equal(edited.status, 200); assigned = edited.body.data;
+    assert.deepEqual((await request('/members', firstToken)).body.data, []);
+    assert.equal((await request(`/members/${assigned.id}`, firstToken)).status, 404);
+    assert.equal((await request(`/members/${assigned.id}`, secondToken)).status, 200);
+    assert.equal((await request(`/members/${assigned.id}/history`, firstToken)).status, 404);
+    assert.deepEqual((await request('/members', secondToken)).body.data.map((item) => item.id), [assigned.id]);
+  });
+  it('clears trainer assignment atomically when changing to an excluded plan', async () => {
+    const count = await MemberHistory.countDocuments({ member: assigned.id });
+    const invalid = await request(`/members/${assigned.id}/renew`, admin, 'POST', { revision: assigned.revision, planId: basicPlan.id, trainerId: secondTrainer.id, trainerIncluded: true });
+    assert.equal(invalid.status, 400);
+    assert.equal((await Member.findById(assigned.id)).revision, assigned.revision);
+    assert.equal(await MemberHistory.countDocuments({ member: assigned.id }), count);
+    const changed = await request(`/members/${assigned.id}/renew`, admin, 'POST', { revision: assigned.revision, planId: basicPlan.id });
+    assert.equal(changed.status, 200); assigned = changed.body.data;
+    assert.equal(assigned.trainer, null); assert.equal(assigned.membership.trainerIncluded, false);
+    assert.deepEqual((await request('/members', secondToken)).body.data, []);
+    assert.equal((await request(`/members/${assigned.id}/history`, secondToken)).status, 404);
+    const history = (await request(`/members/${assigned.id}/history`, admin)).body.data;
+    assert.equal(history[0].membership.trainerIncluded, false);
+    assert.equal(history[0].previousMembership.trainerIncluded, true);
+  });
+  it('assigns a trainer when changing to an included plan and rejects foreign or inactive trainers', async () => {
+    const body = { revision: assigned.revision, planId: includedPlan.id };
+    assert.equal((await request(`/members/${assigned.id}/renew`, admin, 'POST', { ...body, trainerId: otherTrainer.id })).status, 400);
+    assert.equal((await request(`/members/${assigned.id}/renew`, admin, 'POST', { ...body, trainerId: trainer.id })).status, 400);
+    const changed = await request(`/members/${assigned.id}/renew`, admin, 'POST', { ...body, trainerId: firstTrainer.id });
+    assert.equal(changed.status, 200); assigned = changed.body.data;
+    assert.equal(assigned.trainer.id, firstTrainer.id); assert.equal(assigned.membership.trainerIncluded, true);
+    assert.deepEqual((await request('/members', firstToken)).body.data.map((item) => item.id), [assigned.id]);
+  });
+  it('preserves legacy assignments until renewal applies the current plan terms', async () => {
+    const legacy = await request('/members', admin, 'POST', { ...memberValues('legacy-trainer'), planId: includedPlan.id, trainerId: firstTrainer.id });
+    assert.equal(legacy.status, 201);
+    await Member.collection.updateOne({ _id: new mongoose.Types.ObjectId(legacy.body.data.id) }, { $unset: { 'membership.trainerIncluded': '' } });
+    const listed = (await request(`/members?search=legacy-trainer`, admin)).body.data[0];
+    assert.equal(listed.membership.trainerIncluded, true);
+    const updated = await request(`/members/${listed.id}`, admin, 'PATCH', profile(listed));
+    assert.equal(updated.status, 200); assert.equal(updated.body.data.trainer.id, firstTrainer.id);
+    const changed = await request(`/members/${listed.id}/renew`, admin, 'POST', { revision: updated.body.data.revision, planId: basicPlan.id });
+    assert.equal(changed.status, 200); assert.equal(changed.body.data.trainer, null); assert.equal(changed.body.data.membership.trainerIncluded, false);
   });
 });
 

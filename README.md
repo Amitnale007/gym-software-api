@@ -77,7 +77,7 @@ Customer creation accepts `name`, `email`, and `password`. Its role and gym are 
 npm test
 ```
 
-The 76 integration tests start a disposable MongoDB replica set and do not use `.env` or the Atlas database. They cover authentication, role and gym isolation, gym onboarding transactions, subscription master validation, member pricing, archived plans, price snapshots, assignment, renewal dates, cancellation, inactive plans, history rollback, legacy gyms, concurrent updates, token rotation, and logout. The first run downloads MongoDB's test binary into the package cache.
+The 85 integration tests start a disposable MongoDB replica set and do not use `.env` or the Atlas database. They cover authentication, role and gym isolation, gym onboarding transactions, subscription master validation, member pricing, archived plans, price snapshots, assignment, renewal dates, cancellation, inactive plans, history rollback, legacy gyms, concurrent updates, token rotation, logout, trainer-included plans, trainer assignment visibility, and individual member profile access. The first run downloads MongoDB's test binary into the package cache.
 
 Live checks also verified Superadmin login, protected gym listing, subscription master listing, subscription response fields, and logout against the configured Atlas database. Frontend TypeScript and Vite builds and the eight existing mock tests passed. Browser visual verification remains unverified because the earlier Computer Use current-URL check blocked access.
 
@@ -92,6 +92,10 @@ Gym Admin flow: **Member plans ? Add plan ? Trainers ? Add trainer ? Members ? A
 
 Member registration requires name, phone, joining date, an active member plan, and a membership start date on or after joining. Email, address, trainer assignment, and login are optional. Enabling login requires an email and password of at least eight characters and at most 72 UTF-8 bytes. Login emails are unique across accounts. Initial passwords are bcrypt hashed and never returned. Login can also be enabled later from Edit Member. Existing login passwords are not reset by profile edits.
 
+Member plans accept a boolean `trainerIncluded`, defaulting to false. The plan editor provides **Trainer included (no extra charge)**; the fixed plan price covers trainer service. Member creation shows the optional trainer selector only for an included plan. Inclusion is snapshotted into the member's membership and history, so plan master edits apply only to future registrations, renewals, and plan changes. Profile edits use saved membership eligibility. Trainer assignments require an active trainer in the same gym; the API rejects assignments for excluded plans even if the client supplies its own eligibility flag.
+
+Renewal and plan changes accept an optional `trainerId`. Eligible renewals retain the existing assignment if this field is omitted; an empty string removes it. Switching to a plan without trainer inclusion clears the assignment in the same transaction as the membership and history change. Legacy memberships with an existing trainer retain assignment eligibility until renewal or plan change applies the current plan terms. After login, trainers land on **My assigned members** and can view only their assigned members and histories; reassignment or removal immediately changes that access. Search, pagination, and dashboard counts use the same trainer scope.
+
 | Method | Endpoint | Access / behavior |
 | --- | --- | --- |
 | GET / POST | `/api/member-plans` | Gym Admin lists or creates their gym's member plans |
@@ -99,17 +103,18 @@ Member registration requires name, phone, joining date, an active member plan, a
 | GET / POST | `/api/trainers` | Gym Admin lists or creates trainer logins for their gym |
 | PATCH | `/api/trainers/:id` | Gym Admin changes trainer `isActive` |
 | GET | `/api/members` | Gym Admin: their gym; Trainer: assigned members; Member: own linked profile |
+| GET | `/api/members/:id` | Individual profile using the same gym, trainer-assignment, and own-profile access rules |
 | POST | `/api/members` | Gym Admin registers a member and optionally a login |
 | PATCH | `/api/members/:id` | Gym Admin updates contact details, trainer, active status, or enables login |
 | DELETE | `/api/members/:id` | Gym Admin removes a member from the directory and revokes login; requires current revision |
 | POST | `/api/members/:id/renew` | Gym Admin renews or changes a member's plan |
 | GET | `/api/members/:id/history` | Same gym and profile/assignment visibility as member listing |
 
-All tenant scope comes from the authenticated account; client `gym` and `role` overrides are ignored. Foreign plan/trainer assignments are rejected. Member listing supports `search`, `status`, `planId`, `trainerId`, `page`, and `pageSize`; responses include `meta.pagination`. Status is derived as Active, Upcoming, Expired, or Inactive. Trainers and members cannot modify records or access plan administration.
+All tenant scope comes from the authenticated account; client `gym` and `role` overrides are ignored. Foreign plan/trainer assignments are rejected. Member listing supports `search`, `status`, `planId`, `trainerId`, `page`, and `pageSize`; responses include `meta.pagination`. Status is derived as Active, Upcoming, Expired, or Inactive. Trainers and members cannot modify member profiles or memberships, or access plan administration. Assigned trainers can record and correct fitness assessments as described below.
 
 Registration and optional login creation commit together with the initial history entry. Membership prices, plan names, duration, and dates are snapshotted. Renewals use the current master price and duration. Same-plan renewals are blocked while the current membership is active or scheduled, including its expiry date. After expiry, renewal starts today. Selecting a different plan automatically closes outstanding previous plan records and starts the replacement today, in the same transaction; remaining validity is not transferred. Expiry is inclusive. Profile edits and renewals require the latest member `revision`; concurrent/stale writes return 409. Renewals and their history commit in one transaction.
 
-Deactivating a member disables the linked login and revokes its sessions. Deactivating a trainer revokes sessions and clears their assignments while preserving member profiles. Delete Member soft-deletes the gym-scoped record, clears its trainer, disables its linked login, and revokes sessions atomically. Deleted members are excluded from listings, edits, renewals, and history endpoints; stored membership history remains intact. Deletion requires the latest revision and cannot be performed by Trainers, Members, or another gym. Membership history keeps the latest 100 changes visible. This module records memberships; it does not implement payments, billing, attendance, or automated renewal charging.
+Deactivating a member disables the linked login and revokes its sessions. Deactivating a trainer revokes sessions and clears their assignments while preserving member profiles. Delete Member soft-deletes the gym-scoped record, clears its trainer, disables its linked login, and revokes sessions atomically. Deleted members are excluded from listings, edits, renewals, and history endpoints; stored membership history remains intact. Deletion requires the latest revision and cannot be performed by Trainers, Members, or another gym. Membership history keeps the latest 100 changes visible. This module records memberships; it does not implement payments, billing, or automated renewal charging. Attendance is implemented separately below.
 
 Tests in `tests/member-management.test.js` use a disposable MongoDB replica set and cover tenant isolation, four roles, optional logins, trainer visibility, snapshots, concurrent renewals, transaction rollback, expired renewals, and deactivation. No production member records or commercial plans are seeded.
 
@@ -132,3 +137,39 @@ GET `/api/dashboard/summary` returns live member counts, active/expired/upcoming
 The dashboard shows operational member data, without gym contact or platform subscription details. Gym Admins can view their platform plan at Configuration > Subscription; `/api/gyms/mine` continues to supply that information. No revenue or attendance statistics are fabricated or inferred.
 
 Membership history now returns status, closedOn, and closureReason. Replaced plan records are explicitly Closed, while original validity and price remain unchanged for audit. Legacy older history entries are also displayed as previous/closed records rather than additional active plans. The current member record remains the single source of truth for the active membership.
+
+## Member health and fitness
+
+Fitness assessments are stored separately from memberships, scoped by authenticated gym and member. Gym Admins can record/correct assessments for their gym; Trainers can do so only for currently assigned members. Members can read their own records. Soft-deleted members cannot access fitness endpoints, and stored assessment history is retained.
+
+| Method | Endpoint | Behavior |
+| --- | --- | --- |
+| GET | `/api/members/:id/fitness-assessments` | Assessment history ordered by assessment date, then creation date; supports `page` and `pageSize` (5, 10, 25, 50), returns `meta.pagination` |
+| GET | `/api/members/:id/fitness-assessments/summary` | Latest and previous assessments plus the latest 100 assessments in chronological order for charts |
+| POST | `/api/members/:id/fitness-assessments` | Creates a dated assessment; Gym Admin or assigned Trainer |
+| PATCH | `/api/members/:id/fitness-assessments/:assessmentId` | Corrects a record with its current `revision` and a 2–300 character `correctionReason`; stale writes return 409 |
+
+An assessment requires `assessedOn` (YYYY-MM-DD, 2000 through today in India), `heightCm` and `weightKg`. Optional numeric fields are `bodyFatPercent`, `chestCm`, `waistCm`, `leftArmCm`, `rightArmCm`, `leftThighCm`, and `rightThighCm`; omit these or send null when not measured. `notes` allows 1000 characters and `goals` 500. A body fat reading requires `bodyFatMethod`: `bioimpedance`, `skinfold`, `dexa`, or `other`. Without a reading, use an empty method. All numeric inputs are finite, positive and range checked.
+
+BMI is calculated on the server as weight in kg divided by squared height in meters, rounded to one decimal. Client BMI, gym, member and author overrides are ignored. BMI is presented as a screening value without a medical classification. Body fat is a recorded reading rather than a BMI-derived estimate. Corrections atomically preserve previous values, the previous revision, the correcting actor, time and reason in the assessment's `corrections` array. Creating a new assessment never overwrites an older assessment.
+
+`tests/fitness-assessments.test.js` uses a disposable MongoDB replica set to cover calculations, validation, access controls, history pagination, chronological summaries, concurrent corrections, reassignment and retained records after member removal.
+
+## Attendance management
+
+Members check in and check out from their own login using `source: "self"`, or scan the gym QR using `source: "qr"`. The server always selects the profile linked to the authenticated member; supplied member IDs, member codes, gym IDs, actors and timestamps cannot override it. Gym Admins can record exceptions using `source: "manual"` and a member code or ID within their gym. Trainers have read-only access to their assigned members' reports. Superadmins cannot access attendance.
+
+| Method | Endpoint | Behavior |
+| --- | --- | --- |
+| GET | `/api/attendance/me` | Member's current open visit, membership status, re-entry availability and next allowed check-in time |
+| POST | `/api/attendance/punch` | `action` is `check-in` or `check-out`; source is `self`/`qr` for Member, or `manual` for Gym Admin |
+| POST | `/api/attendance/qr-code` | Gym Admin creates/loads their gym's stable opaque QR value for display at the gym |
+| GET | `/api/attendance` | Daily report with date, status, search and pagination; returns `data.records`, date totals and `meta.pagination` |
+| GET | `/api/attendance/activity` | Last-30-day activity, never-visited members, membership status and open visits; supports search, activity filter and pagination |
+| GET | `/api/attendance/export` | CSV filename/content for all visits matching the daily report filters (up to 50000) |
+
+Check-in requires an active member with a current membership. Check-out can close an existing visit after membership expiry or deactivation through an admin manual entry. Punch times are server generated; there is no backdating endpoint. A transaction locks the member while processing punches, and a partial unique database index permits at most one open visit. Repeated or simultaneous punches return 409 rather than creating duplicate visits. Re-entry is permitted 60 seconds after checkout. An optional `attendanceId` on checkout prevents a stale request from closing a different visit. Open visits must be checked out before deleting the member; closed attendance is retained in admin reports after deletion.
+
+Daily report dates and displayed/exported times use Asia/Kolkata. Visits overlapping midnight appear on each applicable report date, with durations clipped to that day and current time. Check-ins/check-outs count events on the selected date; members present is a unique-member count for the day. Inside now is a current count independent of the selected date. The report search/status filters affect rows and export, while summary totals cover the full day. Activity uses a rolling 30-day window independently of membership/account status. CSV cells escape user-entered values that could be interpreted as spreadsheet formulas. Each punch records its source and authenticated actor.
+
+`tests/attendance.test.js` covers member identity enforcement, admin-only manual entries, read-only trainers, gym QR validation, simultaneous duplicate punches, cooldowns, membership validity, midnight boundaries, reports, export and activity visibility.

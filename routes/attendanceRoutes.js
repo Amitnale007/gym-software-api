@@ -1,0 +1,12 @@
+import { Router } from 'express';
+import { authenticate, authorize } from '../middleware/auth.js';
+import { attendanceActivity, gymAttendanceQr, myAttendance, dailyAttendance, exportAttendance, punchAttendance } from '../controllers/attendanceController.js';
+const router = Router();
+router.use(authenticate);
+router.get('/', authorize('GYMADMIN', 'TRAINER', 'MEMBER'), dailyAttendance);
+router.get('/export', authorize('GYMADMIN', 'TRAINER', 'MEMBER'), exportAttendance);
+router.get('/activity', authorize('GYMADMIN', 'TRAINER', 'MEMBER'), attendanceActivity);
+router.get('/me', authorize('MEMBER'), myAttendance);
+router.post('/punch', authorize('GYMADMIN', 'MEMBER'), punchAttendance);
+router.post('/qr-code', authorize('GYMADMIN'), gymAttendanceQr);
+export default router;

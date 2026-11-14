@@ -5,6 +5,7 @@ import authRoutes from './routes/authRoutes.js';
 import gymRoutes from './routes/gymRoutes.js';
 import subscriptionPlanRoutes from './routes/subscriptionPlanRoutes.js';
 import memberManagementRoutes from './routes/memberManagementRoutes.js';
+import attendanceRoutes from './routes/attendanceRoutes.js';
 import { errorResponse } from './utils/response.js';
 
 const app = express();
@@ -17,6 +18,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/gyms', gymRoutes);
 app.use('/api/subscription-plans', subscriptionPlanRoutes);
 app.use('/api/users', userRoutes);
+app.use('/api/attendance', attendanceRoutes);
 app.use('/api', memberManagementRoutes);
 app.use((req, res) => errorResponse(res, 'Endpoint not found.', {}, 404));
 app.use((error, req, res, next) => {

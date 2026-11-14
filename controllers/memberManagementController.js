@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import MemberPlan from '../models/memberPlanModel.js';
 import Member from '../models/memberModel.js';
 import MemberHistory from '../models/memberHistoryModel.js';
+import Attendance from '../models/attendanceModel.js';
 import User from '../models/userModel.js';
 import Session from '../models/sessionModel.js';
 import { email, password, text, HttpError } from '../utils/validation.js';
@@ -26,10 +27,10 @@ function planValues(body) {
   const code = text(body.code, 'Code', 1, 30).toUpperCase();
   if (!/^[A-Z0-9_-]+$/.test(code)) throw new HttpError(400, 'Code must contain letters, numbers, hyphens, or underscores.');
   if (!Number.isInteger(body.durationMonths) || body.durationMonths < 1 || body.durationMonths > 12) throw new HttpError(400, 'Choose a whole number of months from 1 to 12.');
-  return { name, nameKey: name.toLowerCase(), code, description: text(body.description ?? '', 'Description', 0, 500), pricePaise: price(body.price), durationMonths: body.durationMonths, isActive: boolean(body.isActive ?? true, 'Active status') };
+  return { name, nameKey: name.toLowerCase(), code, description: text(body.description ?? '', 'Description', 0, 500), pricePaise: price(body.price), durationMonths: body.durationMonths, trainerIncluded: boolean(body.trainerIncluded === undefined ? false : body.trainerIncluded, 'Trainer included'), isActive: boolean(body.isActive ?? true, 'Active status') };
 }
 function publicPlan(plan) {
-  return { id: String(plan._id), name: plan.name, code: plan.code, description: plan.description, pricePaise: plan.pricePaise, durationMonths: planMonths(plan), isActive: plan.isActive, createdAt: plan.createdAt };
+  return { id: String(plan._id), name: plan.name, code: plan.code, description: plan.description, pricePaise: plan.pricePaise, durationMonths: planMonths(plan), trainerIncluded: plan.trainerIncluded === true, isActive: plan.isActive, createdAt: plan.createdAt };
 }
 export async function listMemberPlans(req, res) {
   const plans = await MemberPlan.find({ gym: req.user.gym, archivedAt: null }).sort({ createdAt: -1 });
@@ -41,7 +42,7 @@ export async function createMemberPlan(req, res) {
 export async function updateMemberPlan(req, res) {
   const plan = await MemberPlan.findOne({ _id: objectId(req.params.id, 'Plan'), gym: req.user.gym, archivedAt: null });
   if (!plan) throw new HttpError(404, 'Member plan not found.');
-  Object.assign(plan, planValues({ name: plan.name, code: plan.code, description: plan.description, price: (plan.pricePaise / 100).toFixed(2), durationMonths: planMonths(plan), isActive: plan.isActive, ...req.body }));
+  Object.assign(plan, planValues({ name: plan.name, code: plan.code, description: plan.description, price: (plan.pricePaise / 100).toFixed(2), durationMonths: planMonths(plan), trainerIncluded: plan.trainerIncluded, isActive: plan.isActive, ...req.body }));
   plan.durationDays = undefined;
   await plan.save();
   return successResponse(res, 'Member plan updated. Existing memberships keep their saved terms.', publicPlan(plan));
@@ -82,8 +83,11 @@ export function memberScope(req) {
   if (req.user.role === 'MEMBER') filter.user = req.user._id;
   return filter;
 }
-function membershipView(value) {
-  return { planId: String(value.plan), planName: value.planName, pricePaise: value.pricePaise, ...(value.durationMonths ? { durationMonths: value.durationMonths } : { durationDays: value.durationDays }), startsOn: value.startsOn, expiresOn: value.expiresOn };
+function trainerIncluded(membership, assignedTrainer = null) {
+  return membership.trainerIncluded ?? Boolean(assignedTrainer);
+}
+function membershipView(value, assignedTrainer = null) {
+  return { planId: String(value.plan), planName: value.planName, pricePaise: value.pricePaise, trainerIncluded: trainerIncluded(value, assignedTrainer), ...(value.durationMonths ? { durationMonths: value.durationMonths } : { durationDays: value.durationDays }), startsOn: value.startsOn, expiresOn: value.expiresOn };
 }
 export function memberView(member) {
   const today = todayInIndia();
@@ -93,11 +97,12 @@ export function memberView(member) {
     trainer: member.trainer?.name ? { id: String(member.trainer._id), name: member.trainer.name } : null,
     hasLogin: Boolean(member.user), isActive: member.isActive, revision: member.revision,
     status: !member.isActive ? 'Inactive' : member.membership.startsOn > today ? 'Upcoming' : member.membership.expiresOn < today ? 'Expired' : 'Active',
-    membership: membershipView(member.membership),
+    membership: membershipView(member.membership, member.trainer),
   };
 }
-async function trainerId(value, gym, session) {
+async function trainerId(value, gym, session, membership) {
   if (value == null || value === '') return null;
+  if (!membership.trainerIncluded) throw new HttpError(400, 'Trainer assignment requires a membership plan with trainer included.');
   const trainer = await User.exists({ _id: objectId(value, 'Trainer'), gym, role: 'TRAINER', isActive: { $ne: false } }).session(session);
   if (!trainer) throw new HttpError(400, 'Choose an active trainer from your gym.');
   return value;
@@ -106,7 +111,7 @@ async function membershipFor(planId, gym, start, session) {
   const plan = await MemberPlan.findOne({ _id: objectId(planId, 'Member plan'), gym, isActive: true, archivedAt: null }).session(session);
   if (!plan) throw new HttpError(400, 'Choose an active member plan from your gym.');
   const months = planMonths(plan);
-  return { plan: plan._id, planName: plan.name, pricePaise: plan.pricePaise, durationMonths: months, startsOn: start, expiresOn: monthExpiry(start, months) };
+  return { plan: plan._id, planName: plan.name, pricePaise: plan.pricePaise, trainerIncluded: plan.trainerIncluded === true, durationMonths: months, startsOn: start, expiresOn: monthExpiry(start, months) };
 }
 function profileValues(body) {
   const phone = text(body.phone, 'Phone', 7, 20);
@@ -119,6 +124,12 @@ function revision(value) {
   return value;
 }
 async function loadedMember(id, gym) { return Member.findOne({ _id: id, gym, deletedAt: null }).populate('trainer', 'name'); }
+
+export async function getMember(req, res) {
+  const member = await Member.findOne({ ...memberScope(req), _id: objectId(req.params.id, 'Member') }).populate('trainer', 'name');
+  if (!member) throw new HttpError(404, 'Member not found.');
+  return successResponse(res, 'Member profile loaded.', memberView(member));
+}
 
 export async function listMembers(req, res) {
   const filter = memberScope(req);
@@ -158,8 +169,8 @@ export async function createMember(req, res) {
   const id = new mongoose.Types.ObjectId();
   await ensureMemberCounter(req.user.gym);
   await mongoose.connection.transaction(async (session) => {
-    const trainer = await trainerId(body.trainerId, req.user.gym, session);
     const membership = await membershipFor(body.planId, req.user.gym, startsOn, session);
+    const trainer = await trainerId(body.trainerId, req.user.gym, session, membership);
     let user = null;
     if (createLogin) {
       const [account] = await User.create([{ name: values.name, email: values.email, passwordHash, role: 'MEMBER', gym: req.user.gym, isActive: values.isActive }], { session });
@@ -183,7 +194,7 @@ export async function updateMember(req, res) {
     const member = await Member.findOne({ _id: id, gym: req.user.gym, deletedAt: null }).session(session);
     if (!member) throw new HttpError(404, 'Member not found.');
     if (member.revision !== expected) throw new HttpError(409, 'Member changed. Refresh and try again.');
-    const trainer = await trainerId(body.trainerId, req.user.gym, session);
+    const trainer = await trainerId(body.trainerId, req.user.gym, session, { trainerIncluded: trainerIncluded(member.membership, member.trainer) });
     let user = member.user;
     if (user) {
       if (!values.email) throw new HttpError(400, 'Email is required for the existing member login.');
@@ -213,8 +224,10 @@ export async function renewMember(req, res) {
     const today = todayInIndia();
     const membership = await membershipFor(planId, req.user.gym, today, session);
     if (samePlan && member.membership.expiresOn >= today) throw new HttpError(409, `This plan is already active or scheduled through ${member.membership.expiresOn}. Renew after expiry, or select a different plan to replace it.`);
-    const previousMembership = member.membership.toObject();
-    const updated = await Member.updateOne({ _id: id, gym: req.user.gym, revision: expected }, { $set: { membership }, $inc: { revision: 1 } }).session(session);
+    // Keep an eligible assignment on renewal, and clear it when trainer service ends.
+    const trainer = await trainerId(body.trainerId === undefined ? (membership.trainerIncluded && member.trainer ? String(member.trainer) : null) : body.trainerId, req.user.gym, session, membership);
+    const previousMembership = { ...member.membership.toObject(), trainerIncluded: trainerIncluded(member.membership, member.trainer) };
+    const updated = await Member.updateOne({ _id: id, gym: req.user.gym, revision: expected }, { $set: { membership, trainer }, $inc: { revision: 1 } }).session(session);
     if (updated.modifiedCount !== 1) throw new HttpError(409, 'Member changed. Refresh and try again.');
     if (!samePlan) await MemberHistory.updateMany({ gym: req.user.gym, member: id, closedAt: null, 'membership.expiresOn': { $gte: today } }, { $set: { closedAt: new Date(), closedOn: today, closureReason: 'Replaced' } }).session(session);
     await MemberHistory.create([{ gym: req.user.gym, member: id, action: samePlan ? 'Renewed' : 'Changed', membership, previousMembership, changedBy: req.user._id }], { session });
@@ -242,6 +255,7 @@ export async function deleteMember(req, res) {
     const member = await Member.findOne({ _id: id, gym: req.user.gym, deletedAt: null }).session(session);
     if (!member) throw new HttpError(404, 'Member not found.');
     if (member.revision !== expected) throw new HttpError(409, 'Member changed. Refresh and try again.');
+    if (await Attendance.exists({ gym: req.user.gym, member: id, checkedOutAt: null }).session(session)) throw new HttpError(409, 'Check out this member’s open attendance visit before deleting their profile.');
     const result = await Member.updateOne({ _id: id, gym: req.user.gym, deletedAt: null, revision: expected }, { $set: { deletedAt: new Date(), isActive: false, trainer: null }, $inc: { revision: 1 } }).session(session);
     if (result.modifiedCount !== 1) throw new HttpError(409, 'Member changed. Refresh and try again.');
     if (member.user) {
