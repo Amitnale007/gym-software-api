@@ -12,13 +12,14 @@ import MemberPlan from './models/memberPlanModel.js';
 import Member from './models/memberModel.js';
 import MemberHistory from './models/memberHistoryModel.js';
 import MemberCounter from './models/memberCounterModel.js';
+import Attendance from './models/attendanceModel.js';
 import { backfillMemberNumbers } from './services/memberNumberService.js';
 
 const startServer = async () => {
   try {
     validateAuthConfig();
     await dbConnect();
-    await Promise.all([User.init(), Gym.init(), Session.init(), SubscriptionPlan.init(), SubscriptionHistory.init(), MemberPlan.init(), Member.init(), MemberHistory.init(), MemberCounter.init()]);
+    await Promise.all([User.init(), Gym.init(), Session.init(), SubscriptionPlan.init(), SubscriptionHistory.init(), MemberPlan.init(), Member.init(), MemberHistory.init(), MemberCounter.init(), Attendance.init()]);
     await backfillMemberNumbers();
     await User.updateMany({ role: 'GYM_CUSTOMER' }, { $set: { role: 'MEMBER' } });
 

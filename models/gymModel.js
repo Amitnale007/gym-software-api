@@ -12,6 +12,7 @@ const gymSchema = new mongoose.Schema({
   status: { type: String, enum: ['Active', 'Inactive'], default: 'Active' },
   subscription: { type: subscriptionSchema, default: null },
   subscriptionRevision: { type: Number, default: 0, min: 0 },
+  attendanceQrToken: { type: String, default: null, select: false },
 }, { timestamps: true });
 
 export default mongoose.model('Gym', gymSchema);

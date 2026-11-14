@@ -16,6 +16,7 @@ const schema = new mongoose.Schema({
   deletedAt: { type: Date, default: null },
   membership: { type: membership, required: true },
   revision: { type: Number, default: 0 },
+  attendanceRevision: { type: Number, default: 0, select: false },
 }, { timestamps: true });
 schema.index({ gym: 1, trainer: 1 });
 schema.index({ gym: 1, memberNumber: 1 }, { unique: true, partialFilterExpression: { memberNumber: { $type: 'number' } } });

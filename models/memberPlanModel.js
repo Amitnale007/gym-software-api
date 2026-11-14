@@ -9,6 +9,7 @@ const schema = new mongoose.Schema({
   pricePaise: { type: Number, required: true, min: 0, max: 1_000_000_000, validate: Number.isSafeInteger },
   durationMonths: { type: Number, min: 1, max: 12, validate: Number.isInteger },
   durationDays: { type: Number, min: 1 }, // Legacy plans remain readable until edited.
+  trainerIncluded: { type: Boolean, default: false },
   isActive: { type: Boolean, default: true },
   archivedAt: { type: Date, default: null },
 }, { timestamps: true });
